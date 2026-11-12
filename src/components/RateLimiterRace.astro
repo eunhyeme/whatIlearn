@@ -1,0 +1,357 @@
+---
+// 같은 요청을 5가지 알고리즘에 동시에 보내고 허용/거부 결과를 나란히 비교한다.
+// 한도: 10초에 5개 (토큰 버킷/누출 버킷은 같은 평균 속도인 2초에 1개로 환산)
+const algos = [
+  { id: 'fixed', name: '고정 윈도 카운터' },
+  { id: 'log', name: '이동 윈도 로그' },
+  { id: 'counter', name: '이동 윈도 카운터' },
+  { id: 'token', name: '토큰 버킷' },
+  { id: 'leaky', name: '누출 버킷' },
+];
+---
+
+<div class="sim race">
+  <div class="race-controls">
+    <button class="primary" data-act="one">요청 1개</button>
+    <button data-act="burst">요청 5개 한꺼번에</button>
+    <button data-act="edge">경계 공격</button>
+    <button data-act="reset">초기화</button>
+  </div>
+  <p class="race-msg" data-msg>한도는 10초에 5개예요. 버튼을 눌러 요청을 보내 보세요.</p>
+
+  <div class="race-clock">
+    <span>고정 윈도 리셋까지</span>
+    <div class="race-bar"><div data-bar></div></div>
+    <span data-remain></span>
+  </div>
+
+  <div class="race-grid">
+    {
+      algos.map((a) => (
+        <div class="race-card" data-algo={a.id}>
+          <div class="race-name">{a.name}</div>
+          <div class="race-state" data-state />
+          <div class="race-dots" data-dots />
+          <div class="race-count">
+            <span class="sim-ok">허용 <b data-ok>0</b></span>
+            <span class="sim-no">거부 <b data-no>0</b></span>
+          </div>
+        </div>
+      ))
+    }
+  </div>
+  <p class="sim-note">
+    초록 점은 허용, 빨간 점은 거부예요. 누출 버킷의 "허용"은 대기열에 들어갔다는 뜻이고, 실제 처리는 2초에 1개씩 이뤄져요.
+    "경계 공격"을 누르면 고정 윈도가 바뀌기 직전과 직후에 5개씩 보내요. 고정 윈도만 10개를 모두 통과시키는 걸 확인해 보세요.
+  </p>
+</div>
+
+<style>
+  .race-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .race-msg {
+    font-size: 0.9rem;
+    color: var(--sl-color-gray-2);
+    margin: 0.75rem 0 !important;
+    min-height: 1.5em;
+  }
+  .race-clock {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-3);
+    margin: 0 0 1rem !important;
+  }
+  .race-bar {
+    flex: 1;
+    height: 6px;
+    background: var(--sl-color-bg-nav);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .race-bar div {
+    height: 100%;
+    background: var(--sl-color-accent);
+  }
+  .race-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+  }
+  .race-card {
+    background: var(--sl-color-bg-nav);
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin: 0 !important;
+  }
+  .race-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+  .race-state {
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-2);
+    margin: 4px 0 0 !important;
+    min-height: 2.6em;
+  }
+  .race-dots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    min-height: 26px;
+    margin: 6px 0 0 !important;
+  }
+  .race-dots :global(i) {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin: 0 !important;
+  }
+  .race-dots :global(i.ok) {
+    background: var(--sl-color-green);
+  }
+  .race-dots :global(i.no) {
+    background: var(--sl-color-red);
+  }
+  .race-count {
+    display: flex;
+    gap: 12px;
+    font-size: 0.8rem;
+    margin: 6px 0 0 !important;
+  }
+</style>
+
+<script>
+  const LIMIT = 5;
+  const WINDOW = 10_000; // ms
+  const RATE = LIMIT / WINDOW; // 토큰 충전 / 누출 속도 (개/ms)
+
+  interface Limiter {
+    tryAcquire(now: number): boolean;
+    describe(now: number): string;
+  }
+
+  class FixedWindow implements Limiter {
+    windowStart = 0;
+    count = 0;
+    private roll(now: number) {
+      const ws = Math.floor(now / WINDOW) * WINDOW;
+      if (ws !== this.windowStart) {
+        this.windowStart = ws;
+        this.count = 0;
+      }
+    }
+    tryAcquire(now: number) {
+      this.roll(now);
+      if (this.count < LIMIT) {
+        this.count++;
+        return true;
+      }
+      return false;
+    }
+    describe(now: number) {
+      this.roll(now);
+      return `이번 윈도 카운터 ${this.count} / ${LIMIT}`;
+    }
+  }
+
+  class SlidingLog implements Limiter {
+    log: number[] = [];
+    private evict(now: number) {
+      this.log = this.log.filter((t) => t > now - WINDOW);
+    }
+    tryAcquire(now: number) {
+      this.evict(now);
+      if (this.log.length < LIMIT) {
+        this.log.push(now);
+        return true;
+      }
+      return false;
+    }
+    describe(now: number) {
+      this.evict(now);
+      return `최근 10초 기록 ${this.log.length}개 / ${LIMIT}`;
+    }
+  }
+
+  class SlidingCounter implements Limiter {
+    windowStart = 0;
+    cur = 0;
+    prev = 0;
+    private roll(now: number) {
+      const ws = Math.floor(now / WINDOW) * WINDOW;
+      if (ws !== this.windowStart) {
+        this.prev = ws - this.windowStart === WINDOW ? this.cur : 0;
+        this.cur = 0;
+        this.windowStart = ws;
+      }
+    }
+    private estimate(now: number) {
+      const overlap = 1 - (now - this.windowStart) / WINDOW;
+      return this.cur + this.prev * overlap;
+    }
+    tryAcquire(now: number) {
+      this.roll(now);
+      if (this.estimate(now) + 1 <= LIMIT) {
+        this.cur++;
+        return true;
+      }
+      return false;
+    }
+    describe(now: number) {
+      this.roll(now);
+      return `이번 ${this.cur} + 지난 ${this.prev} × 겹침 → 추정 ${this.estimate(now).toFixed(1)} / ${LIMIT}`;
+    }
+  }
+
+  class TokenBucket implements Limiter {
+    tokens = LIMIT;
+    last = 0;
+    private refill(now: number) {
+      this.tokens = Math.min(LIMIT, this.tokens + (now - this.last) * RATE);
+      this.last = now;
+    }
+    tryAcquire(now: number) {
+      this.refill(now);
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return true;
+      }
+      return false;
+    }
+    describe(now: number) {
+      this.refill(now);
+      return `토큰 ${this.tokens.toFixed(1)} / ${LIMIT} (2초에 1개 충전)`;
+    }
+  }
+
+  class LeakyBucket implements Limiter {
+    queue = 0;
+    last = 0;
+    private leak(now: number) {
+      this.queue = Math.max(0, this.queue - (now - this.last) * RATE);
+      this.last = now;
+    }
+    tryAcquire(now: number) {
+      this.leak(now);
+      if (this.queue + 1 <= LIMIT) {
+        this.queue += 1;
+        return true;
+      }
+      return false;
+    }
+    describe(now: number) {
+      this.leak(now);
+      return `대기열 ${Math.ceil(this.queue - 1e-9)} / ${LIMIT} (2초에 1개 처리)`;
+    }
+  }
+
+  document.querySelectorAll<HTMLElement>('.race').forEach((root) => {
+    let t0 = performance.now();
+    const now = () => performance.now() - t0;
+    const timers: number[] = [];
+
+    const make = () => ({
+      fixed: new FixedWindow(),
+      log: new SlidingLog(),
+      counter: new SlidingCounter(),
+      token: new TokenBucket(),
+      leaky: new LeakyBucket(),
+    });
+    let limiters: Record<string, Limiter> = make();
+    let history: Record<string, boolean[]> = {};
+    let counts: Record<string, { ok: number; no: number }> = {};
+
+    const cards = [...root.querySelectorAll<HTMLElement>('[data-algo]')];
+    const msg = root.querySelector<HTMLElement>('[data-msg]')!;
+    const bar = root.querySelector<HTMLElement>('[data-bar]')!;
+    const remain = root.querySelector<HTMLElement>('[data-remain]')!;
+
+    const resetState = () => {
+      timers.splice(0).forEach(clearTimeout);
+      t0 = performance.now();
+      limiters = make();
+      history = {};
+      counts = {};
+      cards.forEach((c) => {
+        history[c.dataset.algo!] = [];
+        counts[c.dataset.algo!] = { ok: 0, no: 0 };
+      });
+    };
+
+    const send = (n: number) => {
+      for (let i = 0; i < n; i++) {
+        const t = now();
+        for (const [id, lim] of Object.entries(limiters)) {
+          const ok = lim.tryAcquire(t);
+          history[id].push(ok);
+          if (history[id].length > 30) history[id].shift();
+          counts[id][ok ? 'ok' : 'no']++;
+        }
+      }
+      render();
+    };
+
+    const render = () => {
+      const t = now();
+      cards.forEach((c) => {
+        const id = c.dataset.algo!;
+        c.querySelector('[data-state]')!.textContent = limiters[id].describe(t);
+        c.querySelector('[data-dots]')!.innerHTML = history[id]
+          .map((ok) => `<i class="${ok ? 'ok' : 'no'}"></i>`)
+          .join('');
+        c.querySelector('[data-ok]')!.textContent = String(counts[id].ok);
+        c.querySelector('[data-no]')!.textContent = String(counts[id].no);
+      });
+      const left = WINDOW - (t % WINDOW);
+      bar.style.width = `${((WINDOW - left) / WINDOW) * 100}%`;
+      remain.textContent = `${(left / 1000).toFixed(1)}초`;
+    };
+
+    const edgeAttack = () => {
+      let left = WINDOW - (now() % WINDOW);
+      if (left < 1500) left += WINDOW;
+      const before = left - 500;
+      const after = left + 300;
+      msg.textContent = `경계 공격 예약: ${(before / 1000).toFixed(1)}초 뒤 5개, 윈도가 바뀐 직후 5개를 보내요.`;
+      timers.push(
+        window.setTimeout(() => {
+          send(5);
+          msg.textContent = '윈도가 끝나기 0.5초 전에 5개를 보냈어요. 곧 5개를 더 보내요.';
+        }, before),
+        window.setTimeout(() => {
+          send(5);
+          msg.textContent = '0.8초 사이에 10개를 보냈어요. 고정 윈도만 10개를 모두 허용했는지 확인해 보세요.';
+        }, after),
+      );
+    };
+
+    root.querySelectorAll<HTMLButtonElement>('[data-act]').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        const act = btn.dataset.act;
+        if (act === 'one') {
+          send(1);
+          msg.textContent = '요청 1개를 5가지 알고리즘에 동시에 보냈어요.';
+        } else if (act === 'burst') {
+          send(5);
+          msg.textContent = '요청 5개를 한꺼번에 보냈어요.';
+        } else if (act === 'edge') {
+          edgeAttack();
+        } else {
+          resetState();
+          msg.textContent = '초기화했어요. 한도는 10초에 5개예요.';
+          render();
+        }
+      }),
+    );
+
+    resetState();
+    render();
+    setInterval(render, 100);
+  });
+</script>

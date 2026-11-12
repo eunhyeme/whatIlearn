@@ -1,0 +1,158 @@
+---
+// 이동 윈도 카운터: 최근 1분 창이 직전 윈도와 겹치는 비율로 요청 수를 추정하는 과정을 보여준다.
+const LIMIT = 100;
+---
+
+<div class="sim swc" data-limit={LIMIT}>
+  <div class="sim-row">
+    <label for="swc-t">이번 1분 중 지난 시간</label>
+    <input id="swc-t" type="range" min="0" max="60" step="1" value="30" data-t />
+    <output data-t-out>30초</output>
+  </div>
+  <div class="sim-row">
+    <label for="swc-p">지난 1분 요청 수</label>
+    <input id="swc-p" type="range" min="0" max="100" step="1" value="80" data-p />
+    <output data-p-out>80개</output>
+  </div>
+  <div class="sim-row">
+    <label for="swc-c">이번 1분 요청 수</label>
+    <input id="swc-c" type="range" min="0" max="100" step="1" value="40" data-c />
+    <output data-c-out>40개</output>
+  </div>
+
+  <div class="swc-track" aria-hidden="true">
+    <div class="swc-prev" data-prev>지난 1분</div>
+    <div class="swc-cur" data-cur></div>
+    <div class="swc-overlap" data-ov></div>
+    <div class="swc-win" data-win><span>최근 1분 창</span></div>
+    <div class="swc-divider"></div>
+    <span class="swc-tick" style="left:0">0:00</span>
+    <span class="swc-tick" style="left:50%;transform:translateX(-50%)">1:00</span>
+    <span class="swc-tick" style="right:0">2:00</span>
+  </div>
+
+  <div class="sim-box">
+    <div>지난 1분이 창에 겹친 비율 = <strong data-ratio></strong></div>
+    <div>추정 요청 수 = 이번 <span data-f1></span> + 지난 <span data-f0></span> × <span data-f2></span> = <strong data-est></strong></div>
+    <div data-verdict style="font-weight:600;margin-top:4px"></div>
+  </div>
+  <p class="sim-note">
+    한도는 분당 {LIMIT}개예요. 진하게 칠해진 보라색 부분이 창에 겹쳐서 계산에 들어가는 지난 1분의 몫이에요.
+  </p>
+</div>
+
+<style>
+  .swc-track {
+    position: relative;
+    height: 150px;
+    margin: 1rem 0 0.5rem;
+  }
+  .swc-track > * {
+    margin: 0 !important;
+  }
+  .swc-prev,
+  .swc-cur,
+  .swc-overlap {
+    position: absolute;
+    top: 40px;
+    height: 70px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .swc-prev {
+    left: 0;
+    width: 50%;
+    background: var(--sl-color-purple-low);
+    border: 1px solid var(--sl-color-purple);
+    color: var(--sl-color-purple-high);
+  }
+  .swc-cur {
+    left: 50%;
+    background: var(--sl-color-green-low);
+    border: 1px solid var(--sl-color-green);
+    color: var(--sl-color-green-high);
+  }
+  .swc-overlap {
+    background: color-mix(in srgb, var(--sl-color-purple) 40%, transparent);
+  }
+  .swc-win {
+    position: absolute;
+    top: 28px;
+    height: 94px;
+    width: 50%;
+    border: 2px dashed var(--sl-color-red);
+    border-radius: 8px;
+    box-sizing: border-box;
+  }
+  .swc-win span {
+    position: absolute;
+    top: -24px;
+    left: 0;
+    font-size: 0.75rem;
+    color: var(--sl-color-red-high);
+    white-space: nowrap;
+  }
+  .swc-divider {
+    position: absolute;
+    left: 50%;
+    top: 30px;
+    bottom: 20px;
+    border-left: 1px solid var(--sl-color-gray-4);
+  }
+  .swc-tick {
+    position: absolute;
+    bottom: 0;
+    font-size: 0.75rem;
+    color: var(--sl-color-gray-3);
+  }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>('.swc').forEach((root) => {
+    const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const limit = Number(root.dataset.limit);
+    const tIn = $<HTMLInputElement>('[data-t]');
+    const pIn = $<HTMLInputElement>('[data-p]');
+    const cIn = $<HTMLInputElement>('[data-c]');
+
+    const update = () => {
+      const t = Number(tIn.value);
+      const prev = Number(pIn.value);
+      const cur = Number(cIn.value);
+      const ratio = (60 - t) / 60;
+      const est = Math.round(cur + prev * ratio);
+
+      $('[data-t-out]').textContent = `${t}초`;
+      $('[data-p-out]').textContent = `${prev}개`;
+      $('[data-c-out]').textContent = `${cur}개`;
+
+      $('[data-prev]').textContent = `지난 1분: ${prev}개`;
+      const curEl = $('[data-cur]');
+      curEl.style.width = `${(t / 120) * 100}%`;
+      curEl.textContent = t >= 8 ? `이번: ${cur}개` : '';
+      const ov = $('[data-ov]');
+      ov.style.left = `${(t / 120) * 100}%`;
+      ov.style.width = `${((60 - t) / 120) * 100}%`;
+      $('[data-win]').style.left = `${(t / 120) * 100}%`;
+
+      $('[data-ratio]').textContent = `${60 - t}초 / 60초 = ${Math.round(ratio * 100)}%`;
+      $('[data-f0]').textContent = String(prev);
+      $('[data-f1]').textContent = String(cur);
+      $('[data-f2]').textContent = ratio.toFixed(2);
+      $('[data-est]').textContent = `${est}개`;
+
+      const v = $('[data-verdict]');
+      const ok = est < limit;
+      v.textContent = ok ? `${limit}개 미만이라 새 요청 허용` : `${limit}개 이상이라 새 요청 거부 (429)`;
+      v.className = ok ? 'sim-ok' : 'sim-no';
+    };
+
+    [tIn, pIn, cIn].forEach((el) => el.addEventListener('input', update));
+    update();
+  });
+</script>

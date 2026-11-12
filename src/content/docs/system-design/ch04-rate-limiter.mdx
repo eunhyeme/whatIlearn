@@ -1,0 +1,242 @@
+---
+title: 4장. 처리율 제한 장치
+description: 처리율 제한 알고리즘 5가지를 직접 실행하며 비교하고, Spring Boot와 Redis로 토큰 버킷을 구현한다.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import RateLimiterRace from '../../../components/RateLimiterRace.astro';
+import SlidingWindowCounter from '../../../components/SlidingWindowCounter.astro';
+
+## 한 줄 요약
+
+**클라이언트가 일정 시간 동안 보낼 수 있는 요청 수를 제한해서** 서버 과부하, DoS 공격, 외부 API 비용 폭탄을 막는 장치예요.
+한도를 넘은 요청은 `HTTP 429 Too Many Requests`로 거부해요.
+
+## 쉬운 비유: 놀이기구 앞의 직원
+
+놀이기구 하나를 지키는 직원이 있어요. 손님이 너무 몰리면 기구가 고장 나니까 **얼마나 태울지** 규칙을 정해야 해요.
+
+| 알고리즘 | 비유 | 핵심 |
+|---|---|---|
+| 고정 윈도 카운터 | 정각마다 0으로 리셋되는 카운터 | 쉽지만 경계에서 꼼수가 통함 |
+| 이동 윈도 로그 | 탄 시각을 전부 적는 노트 | 정확하지만 기록이 많음 |
+| 이동 윈도 카운터 | 숫자 두 개로 하는 어림 계산 | 정확하고 가벼움 |
+| 토큰 버킷 | 입장권 상자에서 한 장씩 뽑기 | 상자 크기만큼 몰림을 허용 |
+| 누출 버킷 | 구멍 난 양동이 | 항상 일정한 속도로 처리 |
+
+<Aside type="tip" title="두 계열로 나눠서 기억하기">
+**윈도 계열**(고정 윈도 → 이동 윈도 로그 → 이동 윈도 카운터)은 고정 윈도의 경계 문제를 해결하는 방향으로 발전했어요.
+**버킷 계열**(토큰 버킷, 누출 버킷)은 윈도 개념이 없어서 처음부터 경계 문제가 없어요.
+</Aside>
+
+## 직접 실행해 보기: 5가지 알고리즘 비교
+
+같은 요청을 5가지 알고리즘에 동시에 보내요. 특히 **경계 공격**을 눌러서 고정 윈도의 허점을 확인해 보세요.
+
+<RateLimiterRace />
+
+## 이동 윈도 카운터 자세히 보기
+
+이동 윈도 카운터는 "최근 1분"이라는 창이 지난 1분과 이번 1분에 걸쳐 있을 때, **지난 1분 중 창에 겹친 비율만큼만** 세는 방식이에요.
+
+<SlidingWindowCounter />
+
+- 빨간 점선 창은 항상 길이가 1분이고, 시간이 지나면 오른쪽으로 미끄러져요.
+- 창이 오른쪽으로 갈수록 지난 1분과 겹치는 부분이 줄어서, 계산에 넣는 지난 1분의 몫도 줄어요.
+- 지난 1분의 요청이 **고르게 왔다고 가정한 근사치**예요. 그래도 실제로는 오차가 아주 작아요.
+
+## 알고리즘 비교
+
+| | 메모리 | 몰림(burst) | 정확도 | 실제 사용처 |
+|---|---|---|---|---|
+| 고정 윈도 카운터 | 매우 적음 | 경계에서 최대 2배 통과 | 낮음 | Resilience4j `RateLimiter` |
+| 이동 윈도 로그 | 많음 | 허용 안 함 | 매우 높음 | 정밀한 제한이 필요한 소규모 서비스 |
+| 이동 윈도 카운터 | 적음 (카운터 2개) | 거의 허용 안 함 | 높음 (근사치) | Cloudflare |
+| 토큰 버킷 | 적음 | 버킷 용량만큼 허용 | 높음 | AWS API Gateway, Stripe, Spring Cloud Gateway, Bucket4j |
+| 누출 버킷 | 적음 | 대기열에 쌓음 | 높음 | Shopify, Nginx `limit_req` |
+
+## 무엇을 기준으로 셀까: 키 설계
+
+버킷(또는 카운터)은 **키마다 하나씩** 생겨요. 무엇을 키로 삼느냐가 곧 "누구에게 한도를 거느냐"예요.
+
+| 키 | 예시 | 쓰임 |
+|---|---|---|
+| 사용자 ID | `rate:user:123` | 로그인한 사용자별 공정한 제한 |
+| API 키 | `rate:apikey:abc` | 요금제별 한도 (Free 100회, Pro 1000회) |
+| IP | `rate:ip:1.2.3.4` | 로그인, 회원가입 같은 인증 전 요청 |
+| 사용자 + 엔드포인트 | `rate:user:123:/api/posts` | 비싼 API만 더 엄격하게 |
+| 전역 | `rate:global` | 외부 결제 API 호출량 보호 |
+
+<Aside type="caution">
+IP 기준은 회사나 학교처럼 NAT 뒤에 있는 사용자들을 한꺼번에 막을 수 있어요. 키가 많아지면 Redis에 TTL을 걸어서 오래 안 쓴 버킷이 사라지게 해야 해요.
+</Aside>
+
+## 분산 환경에서 생기는 문제
+
+### 경쟁 조건
+
+`GET` → 비교 → `SET`을 따로 실행하면, 두 요청이 동시에 "남은 토큰 1개"를 읽고 둘 다 통과할 수 있어요.
+**Redis Lua 스크립트**로 읽기와 쓰기를 한 번에 원자적으로 실행하는 게 정석이에요.
+
+### 동기화
+
+서버가 여러 대면 각 서버의 메모리에 상태를 두면 안 돼요. 서버 3대가 각자 "분당 100회"를 세면 실제로는 300회가 통과해요.
+모든 서버가 **중앙 Redis 하나**를 바라보게 해요.
+
+### 클라이언트에게 알려주기
+
+| 헤더 | 의미 |
+|---|---|
+| `X-Ratelimit-Limit` | 윈도당 허용 요청 수 |
+| `X-Ratelimit-Remaining` | 남은 요청 수 |
+| `X-Ratelimit-Retry-After` | 몇 초 뒤에 다시 보내면 되는지 |
+
+## Spring Boot + Redis로 토큰 버킷 구현
+
+Redis Lua 스크립트로 충전과 차감을 원자적으로 처리하고, 인터셉터에서 키별로 검사해요.
+
+<Tabs>
+  <TabItem label="token_bucket.lua">
+
+```lua
+-- KEYS[1]: 버킷 키, ARGV[1]: 용량, ARGV[2]: 초당 충전 개수, ARGV[3]: 요청 토큰 수
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local requested = tonumber(ARGV[3])
+
+-- 서버마다 시계가 다를 수 있으니 Redis 서버 시간을 기준으로 삼는다
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1]) or capacity
+local ts = tonumber(data[2]) or now
+
+-- 타이머 없이, 요청이 올 때 지난 시간만큼 한꺼번에 충전 (lazy refill)
+tokens = math.min(capacity, tokens + math.max(0, now - ts) * rate / 1000)
+
+local allowed = 0
+if tokens >= requested then
+  tokens = tokens - requested
+  allowed = 1
+end
+
+redis.call('HSET', key, 'tokens', tokens, 'ts', now)
+-- 버킷이 가득 찰 시간의 2배 동안 요청이 없으면 키 삭제
+redis.call('PEXPIRE', key, math.ceil(capacity / rate * 1000) * 2)
+
+return { allowed, math.floor(tokens) }
+```
+
+  </TabItem>
+  <TabItem label="RedisTokenBucketRateLimiter.java">
+
+```java
+@Component
+@RequiredArgsConstructor
+public class RedisTokenBucketRateLimiter {
+
+    private final StringRedisTemplate redisTemplate;
+
+    private static final RedisScript<List> SCRIPT = RedisScript.of(
+            new ClassPathResource("scripts/token_bucket.lua"), List.class);
+
+    public RateLimitResult tryAcquire(String key, long capacity, double refillPerSecond) {
+        List<Long> result = redisTemplate.execute(
+                SCRIPT,
+                List.of("rate:" + key),
+                String.valueOf(capacity),
+                String.valueOf(refillPerSecond),
+                "1");
+
+        boolean allowed = result != null && result.get(0) == 1L;
+        long remaining = result == null ? 0 : result.get(1);
+        return new RateLimitResult(allowed, remaining);
+    }
+
+    public record RateLimitResult(boolean allowed, long remaining) {}
+}
+```
+
+  </TabItem>
+  <TabItem label="RateLimitInterceptor.java">
+
+```java
+@Component
+@RequiredArgsConstructor
+public class RateLimitInterceptor implements HandlerInterceptor {
+
+    private static final long CAPACITY = 10;        // 최대 몰림 허용량
+    private static final double REFILL_PER_SEC = 1; // 평균 초당 1회
+
+    private final RedisTokenBucketRateLimiter rateLimiter;
+
+    @Override
+    public boolean preHandle(HttpServletRequest request,
+                             HttpServletResponse response,
+                             Object handler) throws IOException {
+        String key = resolveKey(request);
+        var result = rateLimiter.tryAcquire(key, CAPACITY, REFILL_PER_SEC);
+
+        response.setHeader("X-Ratelimit-Limit", String.valueOf(CAPACITY));
+        response.setHeader("X-Ratelimit-Remaining", String.valueOf(result.remaining()));
+
+        if (!result.allowed()) {
+            response.setHeader("X-Ratelimit-Retry-After",
+                    String.valueOf((long) Math.ceil(1 / REFILL_PER_SEC)));
+            response.sendError(HttpStatus.TOO_MANY_REQUESTS.value());
+            return false;
+        }
+        return true;
+    }
+
+    // 로그인 사용자는 사용자 ID, 아니면 IP 기준
+    private String resolveKey(HttpServletRequest request) {
+        Principal user = request.getUserPrincipal();
+        return user != null ? "user:" + user.getName() : "ip:" + request.getRemoteAddr();
+    }
+}
+```
+
+  </TabItem>
+</Tabs>
+
+<Aside>
+직접 구현하지 않아도 되는 선택지도 있어요. Spring Cloud Gateway의 `RedisRateLimiter`는 같은 원리(Redis + Lua 토큰 버킷)로 동작하고, 단일 애플리케이션이라면 Bucket4j를 쓸 수 있어요.
+</Aside>
+
+## 면접 예상 질문
+
+<details>
+<summary>고정 윈도 카운터의 문제점은 무엇이고, 어떻게 해결하나요?</summary>
+
+윈도 경계 직전과 직후에 요청이 몰리면 짧은 시간에 한도의 최대 2배가 통과해요.
+이동 윈도 로그로 정확하게 막을 수 있지만 타임스탬프를 모두 저장해야 해서 메모리가 많이 들어요.
+실무에서는 직전 윈도 카운터에 겹친 비율을 곱해 더하는 이동 윈도 카운터로 절충해요.
+
+</details>
+
+<details>
+<summary>토큰 버킷과 누출 버킷의 차이는 무엇인가요?</summary>
+
+토큰 버킷은 쌓인 토큰만큼 순간적인 몰림을 **즉시 처리**해요. 평균 속도와 최대 몰림량을 함께 정할 수 있어서 일반 API에 잘 맞아요.
+누출 버킷은 요청을 대기열에 넣고 **항상 일정한 속도로** 처리해요. 외부 결제 API처럼 다운스트림을 일정한 속도로 보호해야 할 때 맞아요.
+
+</details>
+
+<details>
+<summary>서버가 여러 대일 때 처리율 제한은 어떻게 구현하나요?</summary>
+
+상태를 각 서버 메모리가 아니라 중앙 Redis에 둬요.
+읽기, 비교, 쓰기 사이에 경쟁 조건이 생기지 않도록 Lua 스크립트로 묶어 원자적으로 실행해요.
+시계가 서버마다 다를 수 있으니 Redis의 `TIME` 명령으로 기준 시간을 통일해요.
+
+</details>
+
+## 참고 자료
+
+- 『가상 면접 사례로 배우는 대규모 시스템 설계 기초』 4장
+- [Amazon API Gateway 요청 제한](https://docs.aws.amazon.com/ko_kr/apigateway/latest/developerguide/api-gateway-request-throttling.html)
+- [Rate Limiting: The 4 Algorithms Behind Every 429 (YouTube)](https://www.youtube.com/watch?v=H0SWt7MB0lI)
+- [Token Bucket Rate Limiter, Redis와 Java (YouTube)](https://youtube.com/watch?v=cfF6nXIpDwE)

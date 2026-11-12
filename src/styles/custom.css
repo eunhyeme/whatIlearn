@@ -1,0 +1,65 @@
+/* 시뮬레이터 공통 스타일 */
+.sim {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin: 1.5rem 0;
+}
+.sim-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.sim-row label {
+  font-size: 0.9rem;
+  color: var(--sl-color-gray-3);
+  min-width: 150px;
+}
+.sim-row input[type='range'] {
+  flex: 1;
+}
+.sim-row output {
+  font-weight: 600;
+  min-width: 48px;
+}
+.sim-box {
+  background: var(--sl-color-bg-nav);
+  border-radius: 8px;
+  padding: 1rem;
+  line-height: 1.9;
+}
+.sim-box > *,
+.sim-row,
+.sim-row > * {
+  margin-top: 0 !important;
+}
+.sim-note {
+  font-size: 0.8rem;
+  color: var(--sl-color-gray-3);
+  margin-top: 8px;
+}
+.sim-ok {
+  color: var(--sl-color-green-high);
+}
+.sim-no {
+  color: var(--sl-color-red-high);
+}
+.sim button {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--sl-color-gray-4);
+  background: transparent;
+  color: var(--sl-color-text);
+  cursor: pointer;
+}
+.sim button:hover {
+  background: var(--sl-color-bg-nav);
+}
+.sim button.primary {
+  background: var(--sl-color-accent);
+  border-color: var(--sl-color-accent);
+  color: var(--sl-color-black);
+}
